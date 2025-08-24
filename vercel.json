@@ -1,6 +1,7 @@
 {
-  "version": 2,
-  "routes": [
-    { "src": "/api/qt", "dest": "api/qt.js" }
-  ]
+  "functions": {
+    "api/qt.js": {
+      "runtime": "nodejs18.x"
+    }
+  }
 }
