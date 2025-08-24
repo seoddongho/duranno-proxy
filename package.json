@@ -1,15 +1,4 @@
 {
-  "name": "duranno-proxy",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "jsdom": "^24.0.0",
-    "node-fetch": "^3.3.2"
-  }
-
-}
-
-{
   "type": "module",
   "dependencies": {
     "jsdom": "^24.0.0",
@@ -17,3 +6,4 @@
     "iconv-lite": "^0.6.3"
   }
 }
+
