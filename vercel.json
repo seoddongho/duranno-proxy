@@ -1,0 +1,6 @@
+{
+  "version": 2,
+  "routes": [
+    { "src": "/api/qt", "dest": "/api/qt.js" }
+  ]
+}
