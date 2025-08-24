@@ -1,11 +1,7 @@
 {
   "version": 2,
   "functions": {
-    "api/qt.js": {
-      "runtime": "nodejs18.x",
-      "memory": 128,
-      "maxDuration": 10
-    }
+    "api/qt.js": { "runtime": "nodejs18.x" }
   },
   "routes": [
     { "src": "/api/qt", "dest": "/api/qt.js" }
