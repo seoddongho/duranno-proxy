@@ -1,8 +1,10 @@
 {
   "functions": {
     "api/qt.js": {
-      "runtime": "nodejs18.x"
+      "runtime": "nodejs20.x"
     }
   },
-  "routes": [{ "src": "/api/qt", "dest": "api/qt.js" }]
+  "routes": [
+    { "src": "/api/qt", "dest": "/api/qt.js" }
+  ]
 }
