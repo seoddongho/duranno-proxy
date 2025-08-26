@@ -34,33 +34,39 @@ function decodeBuffer(ab, guess = "") {
   return looksBroken ? iconv.decode(buf, "cp949") : utf;
 }
 
-/* ---------- header/meta parse ---------- */
-function normSpace(s=""){
-  return s.replace(/\u00A0/g," ").replace(/\s+/g," ").trim(); // NBSP 처리
+/* ---------- helpers ---------- */
+const norm = (s="") => s.replace(/\u00A0/g," ").replace(/\s+/g," ").trim();
+
+/** 책/범위 추출 (문장 어디든) */
+function findBookRange(s=""){
+  s = norm(s);
+  // 예: 에스겔 22:17–22  /  에스겔  22 : 17~31
+  const m = s.match(/([가-힣A-Za-z·]+)\s+(\d+\s*:\s*\d+(?:\s*[~–-]\s*\d+)?)/);
+  if (!m) return { book:"", range:"" };
+  return {
+    book: norm(m[1]),
+    range: m[2].replace(/\s+/g,"").replace(/-/g,"–").replace("~","–")
+  };
 }
+
+/* ---------- header/meta parse ---------- */
 function parseHeader($) {
-  const h1 = $("h1").first();
+  // 1순위: 본문 컨테이너 안의 h1
+  let $h1 = $(".font-size h1").first();
+  if (!$h1.length) $h1 = $("h1").first();
 
-  const spanText = normSpace(h1.find("span").first().text()); // "에스겔  22 : 17~31"
-  const emText   = normSpace(h1.find("em").first().text());   // 소제목
-  const h1Text   = normSpace(h1.text());
+  const spanText = norm($h1.find("span").first().text()); // "에스겔  22 : 17~31"
+  const emText   = norm($h1.find("em").first().text());   // 소제목
+  const h1Text   = norm($h1.text());
 
-  // 범위: "숫자:숫자(~숫자)" 유연 매칭
-  const rangeRe = /(\d+\s*:\s*\d+(?:\s*[~–-]\s*\d+)?)/;
-  // 책+범위 (문장 어디든 허용: ^ 제거)
-  const bookRangeRe = /([가-힣A-Za-z·\s]+?)\s+(\d+\s*:\s*\d+(?:\s*[~–-]\s*\d+)?)/;
+  // 우선 spanText에서 탐색, 실패 시 h1Text에서 탐색
+  let { book, range } = findBookRange(spanText || h1Text);
 
-  let book="", range="";
-  let base = spanText || h1Text || "";
-
-  let m = base.match(bookRangeRe);
-  if (m) {
-    book  = normSpace(m[1]);
-    range = m[2].replace(/\s+/g,"").replace(/-/g,"–").replace("~","–");
-  } else {
-    const r = (spanText || h1Text).match(rangeRe);
-    range = r ? r[1].replace(/\s+/g,"").replace(/-/g,"–").replace("~","–") : "";
-    book  = "";
+  // 그래도 실패하면 .font-size 전체 텍스트에서 최종 탐색
+  if (!book || !range) {
+    const all = norm($(".font-size").first().text() || $("body").text());
+    const br = findBookRange(all);
+    if (br.book && br.range) { book = br.book; range = br.range; }
   }
 
   const title = [spanText || (book && range ? `${book} ${range}` : book || ""), emText]
