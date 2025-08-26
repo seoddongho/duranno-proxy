@@ -35,35 +35,32 @@ function decodeBuffer(ab, guess = "") {
 }
 
 /* ---------- header/meta parse ---------- */
+function normSpace(s=""){
+  return s.replace(/\u00A0/g," ").replace(/\s+/g," ").trim(); // NBSP 처리
+}
 function parseHeader($) {
   const h1 = $("h1").first();
 
-  const spanText = h1.find("span").first().text().trim(); // 예: "에스겔  22 : 17~31"
-  const emText   = h1.find("em").first().text().trim();   // 소제목
-  const h1Text   = h1.text().replace(/\s+/g, " ").trim();
+  const spanText = normSpace(h1.find("span").first().text()); // "에스겔  22 : 17~31"
+  const emText   = normSpace(h1.find("em").first().text());   // 소제목
+  const h1Text   = normSpace(h1.text());
 
   // 범위: "숫자:숫자(~숫자)" 유연 매칭
   const rangeRe = /(\d+\s*:\s*\d+(?:\s*[~–-]\s*\d+)?)/;
-  // 책+범위
-  const bookRangeRe = /^([가-힣A-Za-z·\s]+?)\s+(\d+\s*:\s*\d+(?:\s*[~–-]\s*\d+)?)/;
+  // 책+범위 (문장 어디든 허용: ^ 제거)
+  const bookRangeRe = /([가-힣A-Za-z·\s]+?)\s+(\d+\s*:\s*\d+(?:\s*[~–-]\s*\d+)?)/;
 
   let book="", range="";
   let base = spanText || h1Text || "";
 
   let m = base.match(bookRangeRe);
   if (m) {
-    book  = m[1].trim();
+    book  = normSpace(m[1]);
     range = m[2].replace(/\s+/g,"").replace(/-/g,"–").replace("~","–");
   } else {
-    m = h1Text.match(bookRangeRe);
-    if (m) {
-      book  = m[1].trim();
-      range = m[2].replace(/\s+/g,"").replace(/-/g,"–").replace("~","–");
-    } else {
-      const r = (spanText || h1Text).match(rangeRe);
-      range = r ? r[1].replace(/\s+/g,"").replace(/-/g,"–").replace("~","–") : "";
-      book  = ""; // 책 미탐지면 빈 값
-    }
+    const r = (spanText || h1Text).match(rangeRe);
+    range = r ? r[1].replace(/\s+/g,"").replace(/-/g,"–").replace("~","–") : "";
+    book  = "";
   }
 
   const title = [spanText || (book && range ? `${book} ${range}` : book || ""), emText]
