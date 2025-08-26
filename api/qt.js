@@ -1,6 +1,7 @@
-// api/qt.js
-// Duranno QT Proxy: UTF-8/EUC-KR 자동 디코딩 + 본문만 추출
-// 큰제목(책/범위), 소제목(부제)을 메타로 분리해 반환
+// Duranno QT Proxy (Node.js 22.x)
+// - EUC-KR/UTF-8 자동 디코딩
+// - 본문(.bible)만 추출
+// - 큰제목(책 + 범위), 소제목 분리
 
 import iconv from "iconv-lite";
 import * as cheerio from "cheerio";
@@ -20,7 +21,6 @@ function decodeBuffer(ab, guess = "") {
   const isKr =
     g === "euc-kr" ||
     g === "ks_c_5601-1987" ||
-    g === "ks_c_5601" ||
     g === "x-windows-949" ||
     g === "cp949";
 
@@ -37,10 +37,9 @@ function decodeBuffer(ab, guess = "") {
 /* ---------- helpers ---------- */
 const norm = (s="") => s.replace(/\u00A0/g," ").replace(/\s+/g," ").trim();
 
-/** 책/범위 추출 (문장 어디든) */
+/** “에스겔 22:17–22” 같은 패턴 찾기 */
 function findBookRange(s=""){
   s = norm(s);
-  // 예: 에스겔 22:17–22  /  에스겔  22 : 17~31
   const m = s.match(/([가-힣A-Za-z·]+)\s+(\d+\s*:\s*\d+(?:\s*[~–-]\s*\d+)?)/);
   if (!m) return { book:"", range:"" };
   return {
@@ -49,20 +48,18 @@ function findBookRange(s=""){
   };
 }
 
-/* ---------- header/meta parse ---------- */
+/* ---------- header/meta ---------- */
 function parseHeader($) {
-  // 1순위: 본문 컨테이너 안의 h1
+  // 본문 컨테이너 내부의 h1을 우선 사용
   let $h1 = $(".font-size h1").first();
   if (!$h1.length) $h1 = $("h1").first();
 
-  const spanText = norm($h1.find("span").first().text()); // "에스겔  22 : 17~31"
-  const emText   = norm($h1.find("em").first().text());   // 소제목
+  const spanText = norm($h1.find("span").first().text());
+  const emText   = norm($h1.find("em").first().text());
   const h1Text   = norm($h1.text());
 
-  // 우선 spanText에서 탐색, 실패 시 h1Text에서 탐색
   let { book, range } = findBookRange(spanText || h1Text);
 
-  // 그래도 실패하면 .font-size 전체 텍스트에서 최종 탐색
   if (!book || !range) {
     const all = norm($(".font-size").first().text() || $("body").text());
     const br = findBookRange(all);
@@ -75,14 +72,9 @@ function parseHeader($) {
   return { book, range, subtitle: emText || "", title: title || h1Text || "" };
 }
 
-/* ---------- sanitize helpers ---------- */
+/* ---------- sanitize ---------- */
 const JUNK_SEL = [
-  ".song",      // 오늘의 찬송
-  ".helper",    // 묵상 도우미
-  ".amen",      // 아멘 카운트/버튼
-  ".copyright",
-  ".btn-area",
-  ".bible-st",
+  ".song",".helper",".amen",".copyright",".btn-area",".bible-st"
 ].join(",");
 
 function keepOnlyVerses($root) {
@@ -131,7 +123,7 @@ export default async function handler(req, res) {
       headers: {
         "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
         "Accept-Language":"ko,ko-KR;q=0.9,en;q=0.8",
-        "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
       },
       redirect:"follow",
     });
@@ -149,11 +141,11 @@ export default async function handler(req, res) {
     }
 
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Cache-Control", "public, s-maxage=900, stale-while-revalidate=600");
+    res.setHeader("Cache-Control","public, s-maxage=900, stale-while-revalidate=600");
     res.status(200).json({
       date, version: ver,
-      ...meta,         // book, range, subtitle, title
-      html: fragment,  // p.title + table만
+      ...meta,
+      html: fragment,
       source: url
     });
   } catch (err) {
