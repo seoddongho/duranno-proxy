@@ -1,10 +1,10 @@
 // api/qt.js
-// Robust Duranno QT proxy: UTF-8 / EUC-KR(CP949) 처리 + 본문/제목 메타 추출(JSON)
+// Duranno QT Proxy: UTF-8 / EUC-KR(CP949) 자동 디코딩 + 본문(.bible) 추출 + 제목 메타(book/range/subtitle/title)
 
 import iconv from "iconv-lite";
 import * as cheerio from "cheerio";
 
-/** content-type / meta charset 스니핑 */
+/* ---------- helpers: charset sniff / decode ---------- */
 function sniffCharset(contentType = "", headSnippet = "") {
   const ct = /charset\s*=\s*([^;]+)/i.exec(contentType || "");
   if (ct) return ct[1].trim().toLowerCase();
@@ -15,7 +15,6 @@ function sniffCharset(contentType = "", headSnippet = "") {
   return "";
 }
 
-/** Buffer(ArrayBuffer) → 텍스트 (UTF-8 우선, 깨짐 흔적 시 CP949) */
 function decodeBuffer(ab, charsetGuess = "") {
   const buf = Buffer.from(ab);
   const guess = (charsetGuess || "").toLowerCase();
@@ -30,7 +29,6 @@ function decodeBuffer(ab, charsetGuess = "") {
   if (isUtf8) return new TextDecoder("utf-8", { fatal: false }).decode(ab);
   if (isKr) return iconv.decode(buf, "cp949");
 
-  // 추정 실패 → UTF-8 시도 후 깨짐 흔적 있으면 CP949
   let utf = "";
   try { utf = new TextDecoder("utf-8", { fatal: false }).decode(ab); } catch {}
   if (!utf) return iconv.decode(buf, "cp949");
@@ -40,12 +38,12 @@ function decodeBuffer(ab, charsetGuess = "") {
   return looksBroken ? iconv.decode(buf, "cp949") : utf;
 }
 
-/** H1 파서: 책/범위/부제/표시용 제목 */
+/* ---------- helpers: title parser / fragment extractor ---------- */
 function parseHeader($) {
   const h1 = $("h1").first();
-  const spanText = h1.find("span").first().text().trim();
-  const emText = h1.find("em").first().text().trim();
-  const raw = spanText || h1.text().trim();
+  const spanText = h1.find("span").first().text().trim();   // 예: "에스겔 21:1~17"
+  const emText   = h1.find("em").first().text().trim();     // 예: "찌꺼기가 된 족속"
+  const raw      = spanText || h1.text().trim();
 
   let book = "", range = "";
 
@@ -55,12 +53,11 @@ function parseHeader($) {
       .replace(/\s*:\s*/g, ":")
       .replace(/\s*~\s*/g, "–")
       .trim();
-    // 예: "에스겔 21:1–17" / "에스겔 21:1-17"
+    // "에스겔 21:1–17" 또는 "에스겔 21:1-17"
     const m = cleaned.match(/^([가-힣A-Za-z·\s]+)\s+(\d+\s*:\s*\d+(?:[–-]\d+)?)$/);
     if (m) {
-      book = m[1].trim();
-      range = m[2].replace(/\s+/g, "");
-      range = range.replace(/-/g, "–");
+      book  = m[1].trim();
+      range = m[2].replace(/\s+/g, "").replace(/-/g, "–");
     } else {
       book = cleaned;
     }
@@ -70,40 +67,35 @@ function parseHeader($) {
     .filter(Boolean)
     .join(" — ");
 
-  return {
-    book,
-    range,
-    subtitle: emText || "",
-    title: combinedTitle || raw || "",
-  };
+  return { book, range, subtitle: emText || "", title: combinedTitle || raw || "" };
 }
 
-/** 본문 조각 추출(.bible 우선, 후보 점수식) */
 function extractBibleFragment(html) {
   const $ = cheerio.load(html, { decodeEntities: false });
   const meta = parseHeader($);
 
+  // 1) 가장 확실: .bible
   const b = $(".bible");
-  if (b.length) {
-    return { meta, fragment: b.first().prop("outerHTML") };
-  }
+  if (b.length) return { meta, fragment: b.first().prop("outerHTML") };
 
+  // 2) 후보 점수식: table(×2) + p.title
   const candidates = [];
   $("main, article, section, div, body").each((_, el) => {
-    const node = $(el);
+    const node  = $(el);
     const score = node.find("table").length * 2 + node.find("p.title").length;
     if (score >= 3) candidates.push({ node, score });
   });
   candidates.sort((a, b) => b.score - a.score);
-  if (candidates.length) {
-    return { meta, fragment: candidates[0].node.prop("outerHTML") };
-  }
+  if (candidates.length) return { meta, fragment: candidates[0].node.prop("outerHTML") };
+
   return { meta, fragment: "" };
 }
 
+/* ---------- handler ---------- */
 export default async function handler(req, res) {
   try {
     const { date, d = "k" } = req.query || {};
+
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       res.status(400).json({ error: "invalid date. expected YYYY-MM-DD" });
       return;
@@ -125,32 +117,33 @@ export default async function handler(req, res) {
     });
 
     const ab = await resp.arrayBuffer();
-    const headSnippet = Buffer.from(ab).slice(0, 4096).toString("binary");
+    const headSnippet = Buffer.from(ab).slice(0, 4096).toString("binary"); // meta charset 추출용
     const charset = sniffCharset(resp.headers.get("content-type") || "", headSnippet);
 
     const html = decodeBuffer(ab, charset);
     const { meta, fragment } = extractBibleFragment(html);
 
     if (!fragment) {
+      res.setHeader("Access-Control-Allow-Origin", "*");
       res.status(502).json({
         error: "bible fragment not found",
         source: url,
-        note: "페이지 구조/인코딩 특수 케이스일 수 있습니다.",
-        html, // 디버그 참고용
+        html // 디버그용(원문 전체)
       });
       return;
     }
 
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Cache-Control", "public, s-maxage=900, stale-while-revalidate=600");
+    res.setHeader("Cache-Control", "public, s-maxage=900, stale-while-revalidate=600"); // 15분 캐시
     res.status(200).json({
       date,
       version: ver,
-      ...meta,     // book, range, subtitle, title
-      html: fragment,
-      source: url,
+      ...meta,             // book, range, subtitle, title
+      html: fragment,      // 본문 조각(.bible)
+      source: url
     });
   } catch (err) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
     res.status(500).json({ error: String(err?.message || err) });
   }
 }
