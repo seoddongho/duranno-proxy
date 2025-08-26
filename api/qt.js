@@ -1,6 +1,6 @@
 // api/qt.js
-// Duranno QT Proxy: UTF-8/EUC-KR 자동 디코딩 + 본문(.bible)만 추출
-// 예비 케이스에서는 오늘의 찬송(.song) 등 잡영 제거 후 p.title/table만 남겨 반환
+// Duranno QT Proxy: UTF-8/EUC-KR 자동 디코딩 + 본문만 추출
+// 큰제목(책/범위), 소제목(부제)을 메타로 분리해 반환
 
 import iconv from "iconv-lite";
 import * as cheerio from "cheerio";
@@ -34,77 +34,82 @@ function decodeBuffer(ab, guess = "") {
   return looksBroken ? iconv.decode(buf, "cp949") : utf;
 }
 
-/* ---------- meta parse ---------- */
+/* ---------- header/meta parse ---------- */
 function parseHeader($) {
   const h1 = $("h1").first();
-  const spanText = h1.find("span").first().text().trim();   // 예: "에스겔 22 : 17~31"
-  const emText   = h1.find("em").first().text().trim();     // 예: "무너진 곳을 막아설 한 사람을 찾습니다"
-  const raw      = spanText || h1.text().trim();
 
-  let book = "", range = "";
-  if (raw) {
-    const cleaned = raw
-      .replace(/\s+/g, " ")
-      .replace(/\s*:\s*/g, ":")
-      .replace(/\s*~\s*/g, "–")
-      .trim();
-    const m = cleaned.match(/^([가-힣A-Za-z·\s]+)\s+(\d+\s*:\s*\d+(?:[–-]\d+)?)$/);
-    if (m) { book = m[1].trim(); range = m[2].replace(/\s+/g,"").replace(/-/g,"–"); }
-    else   { book = cleaned; }
+  const spanText = h1.find("span").first().text().trim(); // 예: "에스겔  22 : 17~31"
+  const emText   = h1.find("em").first().text().trim();   // 소제목
+  const h1Text   = h1.text().replace(/\s+/g, " ").trim();
+
+  // 범위: "숫자:숫자(~숫자)" 유연 매칭
+  const rangeRe = /(\d+\s*:\s*\d+(?:\s*[~–-]\s*\d+)?)/;
+  // 책+범위
+  const bookRangeRe = /^([가-힣A-Za-z·\s]+?)\s+(\d+\s*:\s*\d+(?:\s*[~–-]\s*\d+)?)/;
+
+  let book="", range="";
+  let base = spanText || h1Text || "";
+
+  let m = base.match(bookRangeRe);
+  if (m) {
+    book  = m[1].trim();
+    range = m[2].replace(/\s+/g,"").replace(/-/g,"–").replace("~","–");
+  } else {
+    m = h1Text.match(bookRangeRe);
+    if (m) {
+      book  = m[1].trim();
+      range = m[2].replace(/\s+/g,"").replace(/-/g,"–").replace("~","–");
+    } else {
+      const r = (spanText || h1Text).match(rangeRe);
+      range = r ? r[1].replace(/\s+/g,"").replace(/-/g,"–").replace("~","–") : "";
+      book  = ""; // 책 미탐지면 빈 값
+    }
   }
-  const title = [spanText || (book + (range ? ` ${range}` : "")), emText].filter(Boolean).join(" — ");
-  return { book, range, subtitle: emText || "", title: title || raw || "" };
+
+  const title = [spanText || (book && range ? `${book} ${range}` : book || ""), emText]
+    .filter(Boolean).join(" — ");
+
+  return { book, range, subtitle: emText || "", title: title || h1Text || "" };
 }
 
 /* ---------- sanitize helpers ---------- */
 const JUNK_SEL = [
-  ".song",              // 오늘의 찬송
-  ".helper",            // 묵상 도우미
-  ".amen",              // 아멘 영역
+  ".song",      // 오늘의 찬송
+  ".helper",    // 묵상 도우미
+  ".amen",      // 아멘 카운트/버튼
   ".copyright",
   ".btn-area",
-  ".bible-st",         // 역본 선택 버튼 바
-  ".font-size > .song",// 특정 구조 대비
+  ".bible-st",
 ].join(",");
 
 function keepOnlyVerses($root) {
-  // p.title + table 만 남기고 나머지는 제거
   const $ = $root.cheerio || cheerio;
-  const container = $("<div/>");
-  const titles = $root.find("p.title");
-  const tables = $root.find("table");
-  // 순서를 유지하려면 원래 노드 순회
-  const nodes = $root.find("p.title, table").toArray();
-  nodes.forEach(n => container.append($(n)));
-  return container.prop("outerHTML");
+  const out = $("<div/>");
+  $root.find("p.title, table").each((_, el) => out.append($(el)));
+  return out.prop("outerHTML");
 }
 
-/* ---------- main extractor ---------- */
+/* ---------- extractor ---------- */
 function extractCleanFragment(html) {
   const $ = cheerio.load(html, { decodeEntities:false });
   const meta = parseHeader($);
 
-  // 1) .bible 우선
   const bible = $(".bible").first();
-  if (bible.length) {
-    return { meta, fragment: keepOnlyVerses(bible) };
-  }
+  if (bible.length) return { meta, fragment: keepOnlyVerses(bible) };
 
-  // 2) 후보 컨테이너 중 점수 상위 하나 선택 후 잡영 제거 → verses만 남김
   const candidates = [];
   $("main, article, section, div, body").each((_, el) => {
     const node = $(el);
     const score = node.find("table").length * 2 + node.find("p.title").length;
     if (score >= 3) candidates.push({ node, score });
   });
-  candidates.sort((a,b) => b.score - a.score);
+  candidates.sort((a,b)=>b.score-a.score);
 
   if (candidates.length) {
     const node = candidates[0].node.clone();
-    node.find(JUNK_SEL).remove();                    // 찬송/도우미 등 제거
-    return { meta, fragment: keepOnlyVerses(node) }; // p.title + table만
+    node.find(JUNK_SEL).remove();
+    return { meta, fragment: keepOnlyVerses(node) };
   }
-
   return { meta, fragment: "" };
 }
 
