@@ -3,8 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "jsdom": "^24.0.0",
-    "node-fetch": "^3.3.2",
+    "cheerio": "^1.0.0-rc.12",
     "iconv-lite": "^0.6.3"
   }
 }
