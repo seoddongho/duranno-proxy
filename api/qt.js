@@ -1,155 +1,156 @@
 // api/qt.js
-// deps: node-fetch, jsdom, iconv-lite
-// package.json: { "type": "module" }
+// Robust Duranno QT proxy: UTF-8 / EUC-KR(CP949) 처리 + 본문/제목 메타 추출(JSON)
 
-import { Buffer } from "node:buffer";
-import fetch from "node-fetch";
-import { JSDOM } from "jsdom";
 import iconv from "iconv-lite";
+import * as cheerio from "cheerio";
 
-/** CORS 공통 헤더 */
-function setCors(res) {
-  // 필요하면 "*" 대신 네 도메인으로 제한 가능 (예: https://example.com)
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+/** content-type / meta charset 스니핑 */
+function sniffCharset(contentType = "", headSnippet = "") {
+  const ct = /charset\s*=\s*([^;]+)/i.exec(contentType || "");
+  if (ct) return ct[1].trim().toLowerCase();
+
+  const meta = headSnippet.match(/charset=["']?\s*([\w-]+)\s*["']?/i);
+  if (meta) return meta[1].trim().toLowerCase();
+
+  return "";
 }
 
-/** 한국시간 yyyy-mm-dd */
-function todayKST() {
-  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+/** Buffer(ArrayBuffer) → 텍스트 (UTF-8 우선, 깨짐 흔적 시 CP949) */
+function decodeBuffer(ab, charsetGuess = "") {
+  const buf = Buffer.from(ab);
+  const guess = (charsetGuess || "").toLowerCase();
+  const isUtf8 = guess === "utf-8" || guess === "utf8";
+  const isKr =
+    guess === "euc-kr" ||
+    guess === "ks_c_5601-1987" ||
+    guess === "ks_c_5601" ||
+    guess === "x-windows-949" ||
+    guess === "cp949";
+
+  if (isUtf8) return new TextDecoder("utf-8", { fatal: false }).decode(ab);
+  if (isKr) return iconv.decode(buf, "cp949");
+
+  // 추정 실패 → UTF-8 시도 후 깨짐 흔적 있으면 CP949
+  let utf = "";
+  try { utf = new TextDecoder("utf-8", { fatal: false }).decode(ab); } catch {}
+  if (!utf) return iconv.decode(buf, "cp949");
+
+  const looksBroken =
+    /�/.test(utf) || /\u0000/.test(utf) || (utf.match(/�/g) || []).length > 5;
+  return looksBroken ? iconv.decode(buf, "cp949") : utf;
 }
 
-/** charset 추정 (Content-Type 헤더 + meta 스니핑) */
-function guessCharset(contentType, buf) {
-  let charset =
-    /charset=([\w-]+)/i.test(contentType || "") ? RegExp.$1.toLowerCase() : "";
+/** H1 파서: 책/범위/부제/표시용 제목 */
+function parseHeader($) {
+  const h1 = $("h1").first();
+  const spanText = h1.find("span").first().text().trim();
+  const emText = h1.find("em").first().text().trim();
+  const raw = spanText || h1.text().trim();
 
-  if (!charset) {
-    // HTML <meta>에서 한 번 더 시도
-    const head = buf.toString("ascii"); // 헤더 영역만 대충 ASCII로 살펴봄
-    const m1 = head.match(/<meta[^>]+charset=["']?([\w-]+)["']?/i);
-    const m2 = head.match(/<meta[^>]+content=["'][^"']*charset=([\w-]+)/i);
-    charset = (m1?.[1] || m2?.[1] || "").toLowerCase();
+  let book = "", range = "";
+
+  if (raw) {
+    const cleaned = raw
+      .replace(/\s+/g, " ")
+      .replace(/\s*:\s*/g, ":")
+      .replace(/\s*~\s*/g, "–")
+      .trim();
+    // 예: "에스겔 21:1–17" / "에스겔 21:1-17"
+    const m = cleaned.match(/^([가-힣A-Za-z·\s]+)\s+(\d+\s*:\s*\d+(?:[–-]\d+)?)$/);
+    if (m) {
+      book = m[1].trim();
+      range = m[2].replace(/\s+/g, "");
+      range = range.replace(/-/g, "–");
+    } else {
+      book = cleaned;
+    }
   }
-  if (/euc-kr|ks_c_5601|cp949/.test(charset)) return "euc-kr";
-  if (charset) return charset;
-  return "utf-8";
+
+  const combinedTitle = [spanText || (book + (range ? ` ${range}` : "")), emText]
+    .filter(Boolean)
+    .join(" — ");
+
+  return {
+    book,
+    range,
+    subtitle: emText || "",
+    title: combinedTitle || raw || "",
+  };
 }
 
-/** 상대경로 → 절대경로 보정 */
-function absolutize(doc, base) {
-  doc.querySelectorAll("[href]").forEach((a) => {
-    try {
-      const u = new URL(a.getAttribute("href"), base);
-      a.setAttribute("href", u.toString());
-    } catch {}
+/** 본문 조각 추출(.bible 우선, 후보 점수식) */
+function extractBibleFragment(html) {
+  const $ = cheerio.load(html, { decodeEntities: false });
+  const meta = parseHeader($);
+
+  const b = $(".bible");
+  if (b.length) {
+    return { meta, fragment: b.first().prop("outerHTML") };
+  }
+
+  const candidates = [];
+  $("main, article, section, div, body").each((_, el) => {
+    const node = $(el);
+    const score = node.find("table").length * 2 + node.find("p.title").length;
+    if (score >= 3) candidates.push({ node, score });
   });
-  doc.querySelectorAll("[src]").forEach((el) => {
-    try {
-      const u = new URL(el.getAttribute("src"), base);
-      el.setAttribute("src", u.toString());
-    } catch {}
-  });
+  candidates.sort((a, b) => b.score - a.score);
+  if (candidates.length) {
+    return { meta, fragment: candidates[0].node.prop("outerHTML") };
+  }
+  return { meta, fragment: "" };
 }
 
 export default async function handler(req, res) {
-  setCors(res);
-
-  // 프리플라이트
-  if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return;
-  }
-
   try {
-    // 파라미터
-    const date = (req.query.date || todayKST()).toString(); // yyyy-mm-dd
-    const version = (req.query.d || "k").toString(); // k(개역개정) | w(우리말성경)
-    const format = (req.query.format || "json").toString(); // json | html
+    const { date, d = "k" } = req.query || {};
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      res.status(400).json({ error: "invalid date. expected YYYY-MM-DD" });
+      return;
+    }
+    const ver = d === "w" ? "w" : "k";
 
-    // 원본 URL
-    const source = `https://www.duranno.com/qt/view/bible.asp?qtDate=${encodeURIComponent(
+    const url = `https://www.duranno.com/qt/view/bible.asp?qtDate=${encodeURIComponent(
       date
-    )}&d=${encodeURIComponent(version)}`;
+    )}&d=${ver}`;
 
-    // 페이지 가져오기 (바이너리)
-    const upstream = await fetch(source, { headers: { "User-Agent": "Mozilla/5.0" } });
-    if (!upstream.ok) throw new Error(`Upstream HTTP ${upstream.status}`);
+    const resp = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+        "Accept-Language": "ko,ko-KR;q=0.9,en;q=0.8",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      redirect: "follow",
+    });
 
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    const ct = (upstream.headers.get("content-type") || "").toLowerCase();
-    const charset = guessCharset(ct, buf);
+    const ab = await resp.arrayBuffer();
+    const headSnippet = Buffer.from(ab).slice(0, 4096).toString("binary");
+    const charset = sniffCharset(resp.headers.get("content-type") || "", headSnippet);
 
-    // EUC-KR 등 → UTF-8로 디코딩
-    const html = iconv.decode(buf, charset);
+    const html = decodeBuffer(ab, charset);
+    const { meta, fragment } = extractBibleFragment(html);
 
-    // DOM 파싱
-    const dom = new JSDOM(html, { url: source });
-    const doc = dom.window.document;
-
-    // 우리가 필요한 영역만 선택
-    const bible = doc.querySelector("div.contents.right.last-div .bible");
-    if (!bible) {
-      res
-        .status(404)
-        .json({ error: "bible element not found", date, version, source, charset });
+    if (!fragment) {
+      res.status(502).json({
+        error: "bible fragment not found",
+        source: url,
+        note: "페이지 구조/인코딩 특수 케이스일 수 있습니다.",
+        html, // 디버그 참고용
+      });
       return;
     }
 
-    // 불필요 요소 제거 + 경로 보정
-    bible.querySelectorAll("script, noscript").forEach((el) => el.remove());
-    absolutize(bible, source);
-
-    // 제목/아멘 수 추출
-    const title = doc.querySelector(".font-size h1 em")?.textContent?.trim() || "오늘의 말씀";
-    const amenText = doc.querySelector(".amen .red-t")?.textContent || "";
-    const amenCount = (() => {
-      const n = amenText.replace(/[^\d]/g, "");
-      return n ? Number(n) : null;
-    })();
-
-    // HTML 조각으로 반환
-    if (format === "html") {
-      res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.setHeader("Cache-Control", "s-maxage=1800, stale-while-revalidate=86400");
-      // 깔끔한 fragment (스타일은 클라이언트에서 입히는 걸 권장)
-      res
-        .status(200)
-        .send(
-          `<div class="qt-fragment" data-date="${date}" data-version="${version}">
-  <h3 class="qt-title">${title} <small>(${date})</small></h3>
-  ${bible.outerHTML}
-</div>`
-        );
-      return;
-    }
-
-    // JSON으로 반환 (클라이언트에서 자유롭게 가공)
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.setHeader("Cache-Control", "s-maxage=1800, stale-while-revalidate=86400");
-    res
-      .status(200)
-      .send(
-        JSON.stringify(
-          {
-            date,
-            version,
-            title,
-            amenCount, // 없으면 null
-            html: bible.outerHTML,
-            source,
-            charset,
-          },
-          null,
-          2
-        )
-      );
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cache-Control", "public, s-maxage=900, stale-while-revalidate=600");
+    res.status(200).json({
+      date,
+      version: ver,
+      ...meta,     // book, range, subtitle, title
+      html: fragment,
+      source: url,
+    });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    res.status(500).json({ error: String(err?.message || err) });
   }
 }
